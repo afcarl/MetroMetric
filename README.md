@@ -8,4 +8,6 @@ Goals:
   * dependence on route, time of day, day of week, and (maybe) weather
   * if I can identify problem buses real time
 
+My initial goal is to collect a weeks's worth of data for 5 lines with different characteristics.
+
 
