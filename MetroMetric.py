@@ -43,24 +43,29 @@ Where they use both, we'll use to match records.
 
 DATA STRUCTURE DEFINITION: | API SOURCE
 PID: prediction ID. Assigned as an internal identifier
-Route: route the event is from | NBP:RouteID
-Direction: description of the direction | BP:DirectionText 
-StopID: the ID of the stop | NBP: StopName
-stopLat: the stop latitude | RD:Stop:Lat
-stopLon: the stop longitude | RD:Stop:Lon
-busID: the identifier of the bus | NBP:VehicleID
+RouteID: route the event is from | NBP:RouteID
+DirectionNum: 0 or 1| BP:DirectionNum 
+DirectionText: description of the | BP:DirectionText
+StopID: the ID of the stop | NBP: StopID
+StopLat: the stop latitude | RD:Stop:Lat
+StopLon: the stop longitude | RD:Stop:Lon
+VehicleID: the identifier of the bus | NBP:VehicleID
 TripID: the identified of the trip | NBP:VehilceID
-busLat: the bus longitude | BP:Lat
-busLon: the bus longitude | BP:Lon
-date : the date of the query
-TOD: the time of the query
+BusLat: the bus longitude | BP:Lat
+BusLon: the bus longitude | BP:Lon
+DateTime: a datetime object so we can do time math later
+TimeStr: the time of the query (full string)
+Time: just the time
+Year: the year
+Month: the month of the year
+Day: the day of the month
 Temp:
-weather: a description of weahter
+Weather: a description of weahter
 PA: predicted arrival: When the bus is predicted to arrive at this stop
 AA1: actual arrival 1: When the bus actually arrived (filled in on later calls), determined by status "arriving"
 AA2: actual arrival 2: When the bus actually arrived (filled in on later calls), determined by close lat - lon from position data
 
-['PID','Route','Direction','StopID','StopLat','StopLon','BusID', 'TripID','BusLat','BusLon','Date','TOD','Temp','Weather','PA','AA1','AA2']
+['PID','RouteID','Direction','StopID','StopLat','StopLon','VehicleID', 'TripID','BusLat','BusLon','Datetime','Timestr','Time','Year','Month','Day','Temp','Weather','PA','AA1','AA2']
 
 """
 
@@ -68,6 +73,7 @@ import json
 import httplib, urllib, base64
 import numpy as np
 import pandas as pd
+import datetime
 
 # my API key from WMATA
 api_key = 'qkk2x7wckemx2bxgs8g2sq8a'
@@ -157,46 +163,84 @@ def InitializeRouteStruct(routes = []):
         # look up the route with API, and use the json module to decode
         RouteData = json.loads(RD(route))
         # make a dataframe for each direction and append them
-        df0 = pd.DataFrame(RouteData['Direction0']['Stops'])
-        df1 = pd.DataFrame(RouteData['Direction1']['Stops'])
+        df0 = pd.DataFrame(RouteData['Direction0']['Stops'], dtype = float)
+        df1 = pd.DataFrame(RouteData['Direction1']['Stops'], dtype = float)
         # note the direction in the df for future use
         df0['Direction']=0
         df1['Direction']=1
         # add to the structure
         RouteStruct[route] = df0.append(df1, ignore_index = True)
+        #make the stop IDs integers
+        RouteStruct[route]['StopID'] = RouteStruct[route]['StopID'].astype(int)
     return RouteStruct
     
 # Initialize MetroDataFrame
 def InitializeMetroDataFrame():
-    dfCols = ['PID','Route','Direction','StopID','StopLat','StopLon','BusID', 'TripID','BusLat','BusLon','Date','TOD','Temp','Weather','PA','AA1','AA2']
+    dfCols = ['PID','RouteID','DirectionNum','StopID','StopLat','StopLon','VehicleID', 'TripID','BusLat','BusLon','Datetime','Timestr','Time','Year','Month','Day','Temp','Weather','PA','AA1','AA2']
     MetroDataFrame = pd.DataFrame(columns = dfCols)
     return MetroDataFrame
 
 # GatherMetroMoment will hit WMATA APIs to grab all bus positions and predictions for the selected routes
-def GatherMetroMoment(MetroDataFrame, RouteStruct):
+def GatherMetroMoment(MDF, RouteStruct):
     #Grab bus positions first, once per moment
     BusPos = pd.DataFrame(json.loads(BP())['BusPositions'], dtype = float)
-    #give a prediction ID larger than any so far
-    PIDstart = max(MetroDataFrame['PID']) + 1
-
+  
     #For each route, grab each stop prediction data and populate the MetroDataFrame  
     for R in RouteStruct:
-        for S in R['StopID']:
-            TempDF = InitializeMetroDataFrame()
+        # optionally, filter for every X stops
+        ## ASK
+        # for each stop
+        for S in RouteStruct[R]['StopID']:
+            NBData = InitializeMetroDataFrame()
             # grab next bus predictions for the stop
-            NBData = pd.DataFrame(json.loads(NBP(S))['Predictions'], dtype = int)
+            NBData = pd.DataFrame(json.loads(NBP(str(int(S))))['Predictions'], dtype = int)
             # filter only the predictions for the route we are calling
             NBData = NBData[NBData['RouteID']==int(R)]
+            NBData['StopID'] = S
             
-            # fill in the stop data
-
-            # fill in the bus position data            
+            # fill in the stop data with a merge (left join) on the stop id as a key, only grabbing lat and lon
+            NBData = pd.merge(NBData, RouteStruct[R][['StopID','Lat','Lon']], on='StopID', how='left')
+            #rename Lat and Lon to be StopLat and StopLon, and call Minutes PA while we're at it
+            NBData.rename(columns={'Minutes':'PA','Lat':'StopLat','Lon':'StopLon'}, inplace=True)
             
-            # Check if there are any arrivals we can fill in    
-                
+            # fill in the bus position data with a merge (left join)  
+            NBData = pd.merge(NBData, BusPos[['VehicleID','Lat','Lon']], on='VehicleID', how='left')
+            #rename Lat and Lon to be BusLat and BusLon
+            NBData.rename(columns={'Minutes':'PA','Lat':'BusLat','Lon':'BusLon'}, inplace=True)            
+            
+            # fill in day and time information
+            Datetime = datetime.datetime.now()            
+            timestr = str(datetime.datetime.now()).split('.')[0]
+            NBData['Timestr'] = timestr
+            NBData['Time'] = timestr[-8:]
+            NBData['Year'] = timestr[:4]
+            NBData['Month'] = timestr[5:7]
+            NBData['Day'] = timestr[8:10]
+            NBData['Datetime'] = Datetime
+            
+            # Check if there are any arrivals we can fill in
+            # Method 1: look for times of zero. Remove from the predictions database, and go backwards to find
+            # predictions within a set time for this tripID
+          
+            #for Arrival in NBData[NBData['PA']==0]:
+            #    # use the vehicle, trip, and stop IDs to go back through to fill in using the arrival time
+            #    arrivals = MDF['VehicleID']==Arrival['VehicleID']&MDF['TripID']==Arrival['TripID']&MDF['StopID']==Arrival['StopID']
+            #    MDF[arrivals]['AA1']=((MDF[arrivals]['Datetime']-Arrival['Datetime']).seconds/60)         
+            # Method 2: go through each bus ID and stop on route to find 
+            ## DistanceThreshold = 1
+            ## use google maps API to check distance            
+            
             # make the PIDs
-            
-    return MetroDataFrame
+            #give a prediction ID larger than any so far
+            if MDF.empty:
+                PIDstart = 1
+            else:
+                PIDstart = int(max(MDF['PID'])) + 1
+            NBData['PID']=range(PIDstart, PIDstart + int(len(NBData.index)))
+            # concat it to the full data frame            
+            MDF = pd.concat([MDF,NBData])    
+    
+    return MDF
     
 # GatherMetroData will run continually and gather metro moments at an interval set in the call.
 def GatherMetroData(interval = 30, routes = []):
@@ -209,7 +253,8 @@ def GatherMetroData(interval = 30, routes = []):
     # per day should be per second * 86400 (s/ day) * fraction of the day to run
     # to run 24 hours, therefore, need to have <= 0.57 calls / second
 
-
+    # create a blank dataframe
+    MDF = InitializeMetroDataFrame()
 
 """ CORRECTED sample code for bus positions
 import httplib, urllib, base64
