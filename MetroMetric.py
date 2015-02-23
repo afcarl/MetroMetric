@@ -28,6 +28,9 @@ API info:
 primary key: qkk2x7wckemx2bxgs8g2sq8a
 secondary key: 9401d150cb6d4c75bbfdfa4a941e8b3e
 
+tier 3 key:
+primary key: 83151dadf5be461f96c84af142a9c984
+
 Bus positions API:
 https://api.wmata.com/Bus.svc/json/jBusPositions[?RouteID][&Lat][&Lon][&Radius]&api_key=qkk2x7wckemx2bxgs8g2sq8a
 Next Bus Positions API:
@@ -69,14 +72,19 @@ AA2: actual arrival 2: When the bus actually arrived (filled in on later calls),
 
 """
 
+import csv
 import json
 import httplib, urllib, base64
 import numpy as np
 import pandas as pd
-import datetime
+import time
+from datetime import datetime
 
 # my API key from WMATA
-api_key = 'qkk2x7wckemx2bxgs8g2sq8a'
+#api_key = 'qkk2x7wckemx2bxgs8g2sq8a'
+
+# my tier 3 API key
+api_key = '83151dadf5be461f96c84af142a9c984'
 
 # metro API functions
 # Route Details API
@@ -181,16 +189,36 @@ def InitializeMetroDataFrame():
     return MetroDataFrame
 
 # GatherMetroMoment will hit WMATA APIs to grab all bus positions and predictions for the selected routes
-def GatherMetroMoment(MDF, RouteStruct):
+def GatherMetroMoment(MDF, RouteStruct, interval):
     #Grab bus positions first, once per moment
     BusPos = pd.DataFrame(json.loads(BP())['BusPositions'], dtype = float)
+    #Write the bus positions for fun
+    DT = str(datetime.now()).replace(" ","-").replace(".","-").replace(":","-")
+    filename = '../../DAT4-students/austin/MetroMetric/BusPositions' + DT + '.csv'
+    with open(filename, 'wb') as f:
+        BusPos.to_csv(f)
   
+        
+    # set up a 'skip number' to do only every nth stop
+    SkipNumber = 5    
+    
+    # calculate how many stops we need to run, and set a seconds to wait between calls to keep calls / second low  
+    CycleTime = (interval - 2.) / sum((len(RouteStruct[R]) for R in RouteStruct)) * SkipNumber
+ 
+      
     #For each route, grab each stop prediction data and populate the MetroDataFrame  
     for R in RouteStruct:
-        # optionally, filter for every X stops
-        ## ASK
+        # iterator to help with stop skipping
+        i = 0
         # for each stop
         for S in RouteStruct[R]['StopID']:
+            # add to the iterator and if it is not a multiple of skipnumber, skip this iteration
+            i+=1
+            if i%SkipNumber != 0: continue       
+            
+            #grab the time at the beginning of this iteration so we can sleep at the end
+            IntervalS = datetime.now()
+            
             NBData = InitializeMetroDataFrame()
             # grab next bus predictions for the stop
             NBData = pd.DataFrame(json.loads(NBP(str(int(S))))['Predictions'], dtype = int)
@@ -209,26 +237,14 @@ def GatherMetroMoment(MDF, RouteStruct):
             NBData.rename(columns={'Minutes':'PA','Lat':'BusLat','Lon':'BusLon'}, inplace=True)            
             
             # fill in day and time information
-            Datetime = datetime.datetime.now()            
-            timestr = str(datetime.datetime.now()).split('.')[0]
+            Datetime = datetime.now()            
+            timestr = str(datetime.now()).split('.')[0]
             NBData['Timestr'] = timestr
             NBData['Time'] = timestr[-8:]
             NBData['Year'] = timestr[:4]
             NBData['Month'] = timestr[5:7]
             NBData['Day'] = timestr[8:10]
             NBData['Datetime'] = Datetime
-            
-            # Check if there are any arrivals we can fill in
-            # Method 1: look for times of zero. Remove from the predictions database, and go backwards to find
-            # predictions within a set time for this tripID
-          
-            #for Arrival in NBData[NBData['PA']==0]:
-            #    # use the vehicle, trip, and stop IDs to go back through to fill in using the arrival time
-            #    arrivals = MDF['VehicleID']==Arrival['VehicleID']&MDF['TripID']==Arrival['TripID']&MDF['StopID']==Arrival['StopID']
-            #    MDF[arrivals]['AA1']=((MDF[arrivals]['Datetime']-Arrival['Datetime']).seconds/60)         
-            # Method 2: go through each bus ID and stop on route to find 
-            ## DistanceThreshold = 1
-            ## use google maps API to check distance            
             
             # make the PIDs
             #give a prediction ID larger than any so far
@@ -239,11 +255,49 @@ def GatherMetroMoment(MDF, RouteStruct):
             NBData['PID']=range(PIDstart, PIDstart + int(len(NBData.index)))
             # concat it to the full data frame            
             MDF = pd.concat([MDF,NBData])    
-    
-    return MDF
-    
+            
+            #append to the output
+            with open('../../DAT4-students/austin/MetroMetric/MetroMetric.csv', 'ab') as f:
+                NBData.to_csv(f, header = False)
+                
+            # compute any extra time in the cyclee and pause
+            Interval = datetime.now() - IntervalS
+            ExtraTime = CycleTime - Interval.seconds - Interval.microseconds*1./1000000
+            if ExtraTime > 0:
+                time.sleep(ExtraTime)
+            else:
+                print('warning, time for cycle exceeded')
+        # Check if there are any arrivals we can fill in
+        # Method 1: look for times of zero. Remove from the predictions database, and go backwards to find
+        # predictions within a set time for this tripID
+        
+        # use the vehicle, trip, and stop IDs to go back through to fill in using the arrival time
+        for index, row in MDF[MDF['PA']==0].iterrows():
+            arrivals = (MDF['VehicleID']==row['VehicleID']) & ((MDF['TripID']==row['TripID']) & (MDF['StopID']==row['StopID']))
+            MDF[arrivals]['AA1']=(MDF[arrivals]['Datetime'].minute-row['Datetime'].minute)         
+ 
+       
+        # Method 2: go through each bus ID and stop on route to find 
+            ## DistanceThreshold = 1
+            ## use google maps API to check distance  
+    return MDF   
+
+
+
+# code to test the protocol and gather some data
+MDF = InitializeMetroDataFrame()
+RS = InitializeRouteStruct(['70','79'])
+MDF = GatherMetroMoment(MDF,RS, 30)
+
+"""  
 # GatherMetroData will run continually and gather metro moments at an interval set in the call.
-def GatherMetroData(interval = 30, routes = []):
+def GatherMetroData(interval = 30, routes = []):    
+    # define hours to operate
+    # times are in seconds from midnight. 5 am is 18000. 10 pm is 79200
+    StartTime = datetime.time(5,0,0,0)
+    EndTime = datetime.time(17,0,0,0)
+    RunSeconds = EndTime.hour*60*60+EndTime.minute*60+EndTime.second-StartTime.hour*60*60-StartTime.minute*60-StartTime.second  
+    
     # initial data survey
     # get route stop lists
     RouteStruct = InitializeRouteStruct(routes)
@@ -252,9 +306,13 @@ def GatherMetroData(interval = 30, routes = []):
     # per second should be sum of stops over routes + # of routes / interval and can't be greater than 10
     # per day should be per second * 86400 (s/ day) * fraction of the day to run
     # to run 24 hours, therefore, need to have <= 0.57 calls / second
+    NStops = sum((len(RouteStruct[R]) for R in RouteStruct))
+    CPS = (NStops + 1)/interval
+    CPD = CPS*RunSeconds
 
     # create a blank dataframe
     MDF = InitializeMetroDataFrame()
+"""
 
 """ CORRECTED sample code for bus positions
 import httplib, urllib, base64
