@@ -74,17 +74,20 @@ AA2: actual arrival 2: When the bus actually arrived (filled in on later calls),
 
 import csv
 import json
-import httplib, urllib, base64
+import httplib, urllib, urllib2, base64
 import numpy as np
 import pandas as pd
 import time
 from datetime import datetime
 
-# my API key from WMATA
+# my free API key from WMATA
 #api_key = 'qkk2x7wckemx2bxgs8g2sq8a'
 
-# my tier 3 API key
+# my tier 3 WMATA API key
 api_key = '83151dadf5be461f96c84af142a9c984'
+
+# my open weathermap API key
+OWM_api = 'e3530bdb1863c62ef30a7699ba2e3cdd'
 
 # metro API functions
 # Route Details API
@@ -193,6 +196,17 @@ def InitializeMetroDataFrame():
     dfCols = ['PID','RouteID','DirectionNum','StopID','StopLat','StopLon','VehicleID', 'TripID','BusLat','BusLon','Datetime','Timestr','Time','Year','Month','Day','Temp','Weather','PA','AA1','AA2']
     MetroDataFrame = pd.DataFrame(columns = dfCols)
     return MetroDataFrame
+    
+# a function to get weather descriptor and current temperature from Open Weather Map
+def GetWeather():
+    f = urllib2.urlopen('http://api.openweathermap.org/data/2.5/weather?q=Washington,dc')
+    json_string = f.read()
+    parsed_json = json.loads(json_string)
+    # convert from K to F
+    temp = (parsed_json['main']['temp']-273.15)*9/5+32
+    weather = parsed_json['weather'][0]['main']
+    f.close()
+    return temp, weather
 
 # GatherMetroMoment will hit WMATA APIs to grab all bus positions and predictions for the selected routes
 def GatherMetroMoment(MDF, RouteStruct, interval):
@@ -203,8 +217,10 @@ def GatherMetroMoment(MDF, RouteStruct, interval):
     filename = '../../DAT4-students/austin/MetroMetric/BusPositions' + DT + '.csv'
     with open(filename, 'ab') as f:
         BusPos.to_csv(f)
+    
+    # Get the weather
+    temp, weather = GetWeather()
   
-        
     # set up a 'skip number' to do only every nth stop
     SkipNumber = 4   
     
@@ -252,6 +268,10 @@ def GatherMetroMoment(MDF, RouteStruct, interval):
             NBData['Day'] = timestr[8:10]
             NBData['Datetime'] = Datetime
             
+            #add temp and weather data to NBDAta
+            NBData['Temp'] = temp
+            NBData['Weather'] = weather            
+            
             # make the PIDs
             #give a prediction ID larger than any so far
             if MDF.empty:
@@ -272,23 +292,33 @@ def GatherMetroMoment(MDF, RouteStruct, interval):
             if ExtraTime > 0:
                 time.sleep(ExtraTime)
             else:
-                print('warning, time for cycle exceeded')
+                print('warning, time for cycle exceeded')      
       
     return MDF   
 
 
 
 # code to test the protocol and gather some data
+# initialize (run once)
 MDF = InitializeMetroDataFrame()
 RS = InitializeRouteStruct(['70','79'])
+
+# do a cycle (run every interval, currently 30 seconds)
 MDF = GatherMetroMoment(MDF,RS, 30)
 
 
+
+
 ## data processing script.
-# split the data into predictions and arrivals
+# split the data into predictions and arrivals, remove or average duplicates, then do a join between the two
+# to get the actual time as a column in the 
+
 # Method 1: look for times of zero. Remove from the predictions database, and go backwards to find
         # predictions within a set time for this tripID
 # use the vehicle, trip, and stop IDs to go back through to fill in using the arrival time
+
+
+# old approach
         #for index, row in MDF[MDF['PA']==0].iterrows():
         #    arrivals = (MDF['VehicleID']==row['VehicleID']) & ((MDF['TripID']==row['TripID']) & (MDF['StopID']==row['StopID']))
         #    MDF[arrivals]['AA1']=(MDF[arrivals]['Datetime'].minute-row['Datetime'].minute) 
@@ -409,3 +439,18 @@ try:
     conn.close()
 except Exception as e:
     print("[Errno {0}] {1}".format(e.errno, e.strerror))
+    
+    
+"""
+
+"""
+Sample code from WUnderground
+
+f = urllib2.urlopen('http://api.wunderground.com/api/9fea9e8a950b46a1/geolookup/conditions/q/IA/Cedar_Rapids.json')
+json_string = f.read()
+parsed_json = json.loads(json_string)
+location = parsed_json['location']['city']
+temp_f = parsed_json['current_observation']['temp_f']
+print "Current temperature in %s is: %s" % (location, temp_f)
+f.close()
+"""
