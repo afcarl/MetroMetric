@@ -62,8 +62,9 @@ Time: just the time
 Year: the year
 Month: the month of the year
 Day: the day of the month
-Temp:
-Weather: a description of weahter
+Temp: Current Temp in F
+Weather: a description of weather
+Deviation: Deviation, in minutes, from schedule. Positive values indicate that the bus is running late while negative ones are for buses running ahead of schedule.
 PA: predicted arrival: When the bus is predicted to arrive at this stop
 AA1: actual arrival 1: When the bus actually arrived (filled in on later calls), determined by status "arriving"
 AA2: actual arrival 2: When the bus actually arrived (filled in on later calls), determined by close lat - lon from position data
@@ -72,6 +73,7 @@ AA2: actual arrival 2: When the bus actually arrived (filled in on later calls),
 
 """
 
+import os
 import csv
 import json
 import httplib, urllib, urllib2, base64
@@ -172,6 +174,30 @@ def BP(RouteID = ''):
 
     return data
 
+def Inc(RouteID = ''):  
+    headers = {
+    # Basic Authorization Sample
+    # 'Authorization': 'Basic %s' % base64.encodestring('{username}:{password}'),
+    }
+ 
+    params = urllib.urlencode({
+    # Specify your subscription key
+    'api_key': api_key,
+    # Specify values for optional parameters, as needed
+    'Route': RouteID,
+    })
+ 
+    try:
+        conn = httplib.HTTPSConnection('api.wmata.com')
+        conn.request("GET", "/Incidents.svc/json/BusIncidents?%s" % params, "", headers)
+        response = conn.getresponse()
+        data = response.read()
+        conn.close()
+    except Exception as e:
+        print("[Errno {0}] {1}".format(e.errno, e.strerror))
+    
+    return data
+
 # Initialize Route Struct will create a strucutre of routes and stops
 def InitializeRouteStruct(routes = []):
     #create a dictionary object that has all the routes as keys and a frame of stop IDs, lats, lons, and direction
@@ -211,12 +237,17 @@ def GetWeather():
 # GatherMetroMoment will hit WMATA APIs to grab all bus positions and predictions for the selected routes
 def GatherMetroMoment(MDF, RouteStruct, interval):
     #Grab bus positions first, once per moment
-    BusPos = pd.DataFrame(json.loads(BP())['BusPositions'], dtype = float)
-    #Write the bus positions for fun
+    BusPos = pd.DataFrame(json.loads(BP('70'))['BusPositions'], dtype = float)
+    #Write the bus positions for fun. 
     DT = str(datetime.now())[0:10]
-    filename = '../../DAT4-students/austin/MetroMetric/BusPositions' + DT + '.csv'
-    with open(filename, 'ab') as f:
-        BusPos.to_csv(f)
+    filename = '../../MetroMetric/BusPositions' + DT + '.csv'
+    # If the file is new, include the header, otherwise don't
+    if os.path.isfile(filename):
+        with open(filename, 'ab') as f:
+            BusPos.to_csv(f, header = False)
+    else:
+        with open(filename, 'ab') as f:
+            BusPos.to_csv(f)   
     
     # Get the weather
     temp, weather = GetWeather()
@@ -254,7 +285,7 @@ def GatherMetroMoment(MDF, RouteStruct, interval):
             NBData.rename(columns={'Minutes':'PA','Lat':'StopLat','Lon':'StopLon'}, inplace=True)
             
             # fill in the bus position data with a merge (left join)  
-            NBData = pd.merge(NBData, BusPos[['VehicleID','Lat','Lon']], on='VehicleID', how='left')
+            NBData = pd.merge(NBData, BusPos[['VehicleID','Lat','Lon','Deviation']], on='VehicleID', how='left')
             #rename Lat and Lon to be BusLat and BusLon
             NBData.rename(columns={'Minutes':'PA','Lat':'BusLat','Lon':'BusLon'}, inplace=True)            
             
@@ -282,9 +313,13 @@ def GatherMetroMoment(MDF, RouteStruct, interval):
             # concat it to the full data frame            
             MDF = pd.concat([MDF,NBData])    
             
-            #append to the output
-            with open('../../DAT4-students/austin/MetroMetric/MetroMetric.csv', 'ab') as f:
-                NBData.to_csv(f, header = False)
+            #append to the output. If itis a new file, add a header
+            if os.path.isfile('../../MetroMetric/MetroMetric.csv'):
+                with open('../../MetroMetric/MetroMetric.csv', 'ab') as f:
+                    NBData.to_csv(f, header = False)
+            else:
+                with open('../../MetroMetric/MetroMetric.csv', 'ab') as f:
+                    NBData.to_csv(f)
                 
             # compute any extra time in the cyclee and pause
             Interval = datetime.now() - IntervalS
@@ -297,25 +332,34 @@ def GatherMetroMoment(MDF, RouteStruct, interval):
     return MDF   
 
 
-
 # code to test the protocol and gather some data
 # initialize (run once)
 MDF = InitializeMetroDataFrame()
-RS = InitializeRouteStruct(['70','79'])
+RS = InitializeRouteStruct(['70'])
 
 # do a cycle (run every interval, currently 30 seconds)
 MDF = GatherMetroMoment(MDF,RS, 30)
 
+# a clumsy temporary while loop to get data while I'm away
+while True:
+    # only run between 5 am and midnight
+    if datetime.now().hour >= 5:
+        MDF = InitializeMetroDataFrame()
+        MDF = GatherMetroMoment(MDF, RS, 30)
+    else:
+        time.sleep(600)
+        
+    
+
+# create a version that can run repeatedly and not rely on any variable in memory
+def MetroMetricCron():
+    # grab the parameters and route structure
+
+    # run the script
+
+    # store the parameters and route structure
 
 
-
-## data processing script.
-# split the data into predictions and arrivals, remove or average duplicates, then do a join between the two
-# to get the actual time as a column in the 
-
-# Method 1: look for times of zero. Remove from the predictions database, and go backwards to find
-        # predictions within a set time for this tripID
-# use the vehicle, trip, and stop IDs to go back through to fill in using the arrival time
 
 
 # old approach
@@ -443,14 +487,28 @@ except Exception as e:
     
 """
 
-"""
-Sample code from WUnderground
+""" sample code for incidents
 
-f = urllib2.urlopen('http://api.wunderground.com/api/9fea9e8a950b46a1/geolookup/conditions/q/IA/Cedar_Rapids.json')
-json_string = f.read()
-parsed_json = json.loads(json_string)
-location = parsed_json['location']['city']
-temp_f = parsed_json['current_observation']['temp_f']
-print "Current temperature in %s is: %s" % (location, temp_f)
-f.close()
-"""
+import httplib, urllib, base64
+ 
+headers = {
+    # Basic Authorization Sample
+    # 'Authorization': 'Basic %s' % base64.encodestring('{username}:{password}'),
+}
+ 
+params = urllib.urlencode({
+    # Specify your subscription key
+    'api_key': '',
+    # Specify values for optional parameters, as needed
+    #'Route': '',
+})
+ 
+try:
+    conn = httplib.HTTPSConnection('api.wmata.com')
+    conn.request("GET", "/Incidents.svc/json/BusIncidents?%s" % params, "", headers)
+    response = conn.getresponse()
+    data = response.read()
+    print(data)
+    conn.close()
+except Exception as e:
+    print("[Errno {0}] {1}".format(e.errno, e.strerror))
