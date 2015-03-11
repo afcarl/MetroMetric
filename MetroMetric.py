@@ -91,6 +91,12 @@ api_key = '83151dadf5be461f96c84af142a9c984'
 # my open weathermap API key
 OWM_api = 'e3530bdb1863c62ef30a7699ba2e3cdd'
 
+# file path - since I'm running on different comps this makes it easy to switch
+# for laptop
+#filepath = '../../MetroMetric/'
+#for desktop
+filepath = '../GitHub/MetroMetric/'
+
 # metro API functions
 # Route Details API
 def RD(RouteID = 'B30'):
@@ -225,13 +231,19 @@ def InitializeMetroDataFrame():
     
 # a function to get weather descriptor and current temperature from Open Weather Map
 def GetWeather():
-    f = urllib2.urlopen('http://api.openweathermap.org/data/2.5/weather?q=Washington,dc')
-    json_string = f.read()
-    parsed_json = json.loads(json_string)
-    # convert from K to F
-    temp = (parsed_json['main']['temp']-273.15)*9/5+32
-    weather = parsed_json['weather'][0]['main']
-    f.close()
+    # set defaults in case the API fails
+    temp = 0
+    weather = 'unknown'    
+    try:
+        f = urllib2.urlopen('http://api.openweathermap.org/data/2.5/weather?q=Washington,dc')
+        json_string = f.read()
+        parsed_json = json.loads(json_string)
+        # convert from K to F
+        temp = (parsed_json['main']['temp']-273.15)*9/5+32
+        weather = parsed_json['weather'][0]['main']
+        f.close()
+    except Exception as e:
+        print('weather API error')
     return temp, weather
 
 # GatherMetroMoment will hit WMATA APIs to grab all bus positions and predictions for the selected routes
@@ -240,7 +252,7 @@ def GatherMetroMoment(MDF, RouteStruct, interval):
     BusPos = pd.DataFrame(json.loads(BP('70'))['BusPositions'], dtype = float)
     #Write the bus positions for fun. 
     DT = str(datetime.now())[0:10]
-    filename = '../../MetroMetric/BusPositions' + DT + '.csv'
+    filename = filepath + 'BusPositions' + DT + '.csv'
     # If the file is new, include the header, otherwise don't
     if os.path.isfile(filename):
         with open(filename, 'ab') as f:
@@ -287,7 +299,7 @@ def GatherMetroMoment(MDF, RouteStruct, interval):
             # fill in the bus position data with a merge (left join)  
             NBData = pd.merge(NBData, BusPos[['VehicleID','Lat','Lon','Deviation']], on='VehicleID', how='left')
             #rename Lat and Lon to be BusLat and BusLon
-            NBData.rename(columns={'Minutes':'PA','Lat':'BusLat','Lon':'BusLon'}, inplace=True)            
+            NBData.rename(columns={'Lat':'BusLat','Lon':'BusLon'}, inplace=True)            
             
             # fill in day and time information
             Datetime = datetime.now()            
@@ -313,12 +325,13 @@ def GatherMetroMoment(MDF, RouteStruct, interval):
             # concat it to the full data frame            
             MDF = pd.concat([MDF,NBData])    
             
+            filename = filepath + 'MetroMetric.csv'
             #append to the output. If itis a new file, add a header
-            if os.path.isfile('../../MetroMetric/MetroMetric.csv'):
-                with open('../../MetroMetric/MetroMetric.csv', 'ab') as f:
+            if os.path.isfile(filename):
+                with open(filename, 'ab') as f:
                     NBData.to_csv(f, header = False)
             else:
-                with open('../../MetroMetric/MetroMetric.csv', 'ab') as f:
+                with open(filename, 'ab') as f:
                     NBData.to_csv(f)
                 
             # compute any extra time in the cyclee and pause
