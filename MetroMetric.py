@@ -325,7 +325,7 @@ def GatherMetroMoment(MDF, RouteStruct, interval):
             # concat it to the full data frame            
             MDF = pd.concat([MDF,NBData])    
             
-            filename = filepath + 'MetroMetric.csv'
+            filename = filepath + 'MetroMetric312.csv'
             #append to the output. If itis a new file, add a header
             if os.path.isfile(filename):
                 with open(filename, 'ab') as f:
