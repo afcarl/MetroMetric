@@ -41,10 +41,11 @@ https://api.wmata.com/Bus.svc/json/jRouteDetails[?RouteID][&Date]&api_key=qkk2x7
 This process builds a data frame of predictions. Each is a single predictions of a bus and when it will arrive at a stop.
 This means the strucutre will have the same bus many times, since for each pull it will show up in many stops
 It will also be populated with the actual time the bus arrived where possible (since this is actually determined after the rest of the data)
-API abbreviations: BP = BusPosition; NBP = NextBusPosition; RD = route details
+API abbreviations: BP = BusPosition; NBP = NextBusPosition; RD = route details; Inc = incident
 Where they use both, we'll use to match records.
 
 DATA STRUCTURE DEFINITION: | API SOURCE
+index: uses date as the index for easy filtering by date later
 PID: prediction ID. Assigned as an internal identifier
 RouteID: route the event is from | NBP:RouteID
 DirectionNum: 0 or 1| BP:DirectionNum 
@@ -56,6 +57,7 @@ VehicleID: the identifier of the bus | NBP:VehicleID
 TripID: the identified of the trip | NBP:VehilceID
 BusLat: the bus longitude | BP:Lat
 BusLon: the bus longitude | BP:Lon
+Incident: is there a reported incident on the line? | Inc
 DateTime: a datetime object so we can do time math later
 TimeStr: the time of the query (full string)
 Time: just the time
@@ -65,7 +67,7 @@ Day: the day of the month
 Temp: Current Temp in F
 Weather: a description of weather
 Deviation: Deviation, in minutes, from schedule. Positive values indicate that the bus is running late while negative ones are for buses running ahead of schedule.
-PA: predicted arrival: When the bus is predicted to arrive at this stop
+Minutes: predicted arrival: When the bus is predicted to arrive at this stop
 AA1: actual arrival 1: When the bus actually arrived (filled in on later calls), determined by status "arriving"
 AA2: actual arrival 2: When the bus actually arrived (filled in on later calls), determined by close lat - lon from position data
 
@@ -79,8 +81,10 @@ import json
 import httplib, urllib, urllib2, base64
 import numpy as np
 import pandas as pd
+import schedule
 import time
 from datetime import datetime
+from threading import Thread
 
 # my free API key from WMATA
 #api_key = 'qkk2x7wckemx2bxgs8g2sq8a'
@@ -93,9 +97,9 @@ OWM_api = 'e3530bdb1863c62ef30a7699ba2e3cdd'
 
 # file path - since I'm running on different comps this makes it easy to switch
 # for laptop
-#filepath = '../../MetroMetric/'
+filepath = '../MetroMetric/data/'
 #for desktop
-filepath = '../GitHub/MetroMetric/'
+#filepath = '../GitHub/MetroMetric/'
 
 # metro API functions
 # Route Details API
@@ -122,6 +126,31 @@ def RD(RouteID = 'B30'):
     except Exception as e:
         print("[Errno {0}] {1}".format(e.errno, e.strerror))
     return data
+    
+def NBP_list(stopList, store=None):
+    """process a range of stops, storing the results in a dict"""
+    if store is None:
+        store = {}
+    for stopID in stopList:
+        store[stopID] = json.loads(NBP(stopID))
+    return store    
+    
+# threaded function to run NBP in parellel (helps because it takes a couple of seconds)
+def TNBP(nthreads, stopList = []):
+    """process the stop list in a specified number of threads"""
+    store = {}
+    threads = []
+    # create the threads
+    for i in range(nthreads):
+        stops = stopList[i::nthreads]
+        t = Thread(target=NBP_list, args=(stops,store))
+        threads.append(t)
+
+    # start the threads
+    [ t.start() for t in threads ]
+    # wait for the threads to finish
+    [ t.join() for t in threads ]
+    return store
 
 # next bus prediction API
 def NBP(StopID = ''):
@@ -135,21 +164,15 @@ def NBP(StopID = ''):
         # Specify values for the following required parameters
         'StopID': StopID,
         })
- 
+    data = {}
     try:
-        #use the new test URL as request by WMATA
-        URL = "/NextBusService.svc/json/jPredictions?StopID="+StopID+"&api_key=550034573ca5440caf376c6aef51a01d"
-        conn = httplib.HTTPSConnection('wmataapibeta.azure-api.net')        
-        conn.request("GET", URL)        
-        
-        # the original URL
-        #conn = httplib.HTTPSConnection('api.wmata.com')
-        #conn.request("GET", "/NextBusService.svc/json/jPredictions?%s" % params, "", headers)
+        conn = httplib.HTTPSConnection('api.wmata.com')
+        conn.request("GET", "/NextBusService.svc/json/jPredictions?%s" % params, "{body}", headers)
         response = conn.getresponse()
         data = response.read()
         conn.close()
     except Exception as e:
-        print("[Errno {0}] {1}".format(e.errno, e.strerror))
+        print("error")
     return data
     
 # Bus Position API
@@ -177,9 +200,9 @@ def BP(RouteID = ''):
         conn.close()
     except Exception as e:
         print("[Errno {0}] {1}".format(e.errno, e.strerror))
-
     return data
 
+# Bus incidents API
 def Inc(RouteID = ''):  
     headers = {
     # Basic Authorization Sample
@@ -221,12 +244,16 @@ def InitializeRouteStruct(routes = []):
         RouteStruct[route] = df0.append(df1, ignore_index = True)
         #make the stop IDs integers
         RouteStruct[route]['StopID'] = RouteStruct[route]['StopID'].astype(int)
+        # remove any zeros
+        #RouteStruct = RouteStruct[RouteStruct[route]['StopID'] != 0]
     return RouteStruct
     
 # Initialize MetroDataFrame
 def InitializeMetroDataFrame():
-    dfCols = ['PID','RouteID','DirectionNum','StopID','StopLat','StopLon','VehicleID', 'TripID','BusLat','BusLon','Datetime','Timestr','Time','Year','Month','Day','Temp','Weather','PA','AA1','AA2']
+    dfCols = ['PID','RouteID','DirectionNum','StopID','StopLat','StopLon','VehicleID', 'TripID','BusLat','BusLon','Incident','Datetime','Timestr','Time','Year','Month','Day','Temp','Weather','Minutes','AA1','AA2']
     MetroDataFrame = pd.DataFrame(columns = dfCols)
+    # Use `Date` as index
+    MetroDataFrame.set_index('Datetime', inplace=True)
     return MetroDataFrame
     
 # a function to get weather descriptor and current temperature from Open Weather Map
@@ -235,21 +262,24 @@ def GetWeather():
     temp = 0
     weather = 'unknown'    
     try:
-        f = urllib2.urlopen('http://api.openweathermap.org/data/2.5/weather?q=Washington,dc')
-        json_string = f.read()
-        parsed_json = json.loads(json_string)
+        conn = httplib.HTTPConnection('api.openweathermap.org')
+        conn.request("GET", "/data/2.5/weather?q=washingtondc,us&APPID=e3530bdb1863c62ef30a7699ba2e3cdd")
+        response = conn.getresponse()
+        data = response.read()
+        conn.close()        
+        parsed_json = json.loads(data)
         # convert from K to F
         temp = (parsed_json['main']['temp']-273.15)*9/5+32
         weather = parsed_json['weather'][0]['main']
-        f.close()
     except Exception as e:
         print('weather API error')
     return temp, weather
 
 # GatherMetroMoment will hit WMATA APIs to grab all bus positions and predictions for the selected routes
-def GatherMetroMoment(MDF, RouteStruct, interval):
+def GatherMetroMoment(MDF, RouteStruct):
     #Grab bus positions first, once per moment
-    BusPos = pd.DataFrame(json.loads(BP('70'))['BusPositions'], dtype = float)
+    Route = RouteStruct.keys()[0]
+    BusPos = pd.DataFrame(json.loads(BP(Route))['BusPositions'])
     #Write the bus positions for fun. 
     DT = str(datetime.now())[0:10]
     filename = filepath + 'BusPositions' + DT + '.csv'
@@ -263,265 +293,110 @@ def GatherMetroMoment(MDF, RouteStruct, interval):
     
     # Get the weather
     temp, weather = GetWeather()
-  
-    # set up a 'skip number' to do only every nth stop
-    SkipNumber = 4   
-    
-    # calculate how many stops we need to run, and set a seconds to wait between calls to keep calls / second low  
-    CycleTime = (interval - 2.) / sum((len(RouteStruct[R]) for R in RouteStruct)) * SkipNumber
- 
-      
+        
     #For each route, grab each stop prediction data and populate the MetroDataFrame  
     for R in RouteStruct:
-        # iterator to help with stop skipping
-        i = 0
-        # for each stop
-        for S in RouteStruct[R]['StopID']:
-            # add to the iterator and if it is not a multiple of skipnumber, skip this iteration
-            i+=1
-            if i%SkipNumber != 0: continue       
+               
+        #check if there is an incident
+        #future need: capture incident text for potential analysis
+        incident_response = json.loads(Inc(R))
+        incident = len(incident_response['BusIncidents']) > 0
             
-            #grab the time at the beginning of this iteration so we can sleep at the end
-            IntervalS = datetime.now()
+        NBData = pd.DataFrame()        
+        
+        # get the data with threaded approach
+        nthreads = 10
+        raw_data = TNBP(10,RouteStruct[R]['StopID'])
+        
+        # kill invalid stops
+        del raw_data[0]
+        
+        # the dictionary has one dictionary for each stop ID, so iterate through
+        for stopID in raw_data:
+            df = pd.DataFrame(raw_data[stopID]['Predictions'])
+            df['StopID'] = stopID
+            NBData = NBData.append(df)
+        
+        # filter only the predictions for the route we are calling
+        NBData = NBData[NBData['RouteID']==R]
+        #drop the DirectionText column, which we don't use
+        NBData = NBData.drop('DirectionText', 1)        
+        
+        
+        # fill in day and time information
+        Datetime = datetime.now()            
+        timestr = str(datetime.now()).split('.')[0]
+        NBData['Timestr'] = timestr
+        NBData['Time'] = timestr[-8:]
+        NBData['Year'] = timestr[:4]
+        NBData['Month'] = timestr[5:7]
+        NBData['Day'] = timestr[8:10]
+        NBData['Datetime'] = Datetime
+        NBData.set_index('Datetime', inplace=True)
             
-            NBData = InitializeMetroDataFrame()
-            # grab next bus predictions for the stop
-            NBData = pd.DataFrame(json.loads(NBP(str(int(S))))['Predictions'], dtype = int)
-            # filter only the predictions for the route we are calling
-            NBData = NBData[NBData['RouteID']==int(R)]
-            NBData['StopID'] = S
+        #add temp and weather data to NBDAta
+        NBData['Temp'] = temp
+        NBData['Weather'] = weather 
+        
+        NBData['Incident'] = incident
+        
+        # fill in the stop data with a merge (left join) on the stop id as a key, only grabbing lat and lon
+        NBData = pd.merge(NBData, RouteStruct[R][['StopID','Lat','Lon']], on='StopID', how='left')
+        #rename Lat and Lon to be StopLat and StopLon
+        NBData.rename(columns={'Lat':'StopLat','Lon':'StopLon'}, inplace=True)
             
-            # fill in the stop data with a merge (left join) on the stop id as a key, only grabbing lat and lon
-            NBData = pd.merge(NBData, RouteStruct[R][['StopID','Lat','Lon']], on='StopID', how='left')
-            #rename Lat and Lon to be StopLat and StopLon, and call Minutes PA while we're at it
-            NBData.rename(columns={'Minutes':'PA','Lat':'StopLat','Lon':'StopLon'}, inplace=True)
+        # fill in the bus position data with a merge (left join)  
+        NBData = pd.merge(NBData, BusPos[['VehicleID','Lat','Lon','Deviation']], on='VehicleID', how='left')
+        #rename Lat and Lon to be BusLat and BusLon
+        NBData.rename(columns={'Lat':'BusLat','Lon':'BusLon'}, inplace=True)         
+        
+          
+        #make the PIDs
+        #give a prediction ID larger than any so far
+        if MDF.empty:
+            PIDstart = 1
+        else:
+            PIDstart = int(max(MDF['PID'])) + 1
+        NBData['PID']=range(PIDstart, PIDstart + int(len(NBData.index)))
+        # concat it to the full data frame 
+
+        MDF = pd.concat([MDF,NBData])    
             
-            # fill in the bus position data with a merge (left join)  
-            NBData = pd.merge(NBData, BusPos[['VehicleID','Lat','Lon','Deviation']], on='VehicleID', how='left')
-            #rename Lat and Lon to be BusLat and BusLon
-            NBData.rename(columns={'Lat':'BusLat','Lon':'BusLon'}, inplace=True)            
-            
-            # fill in day and time information
-            Datetime = datetime.now()            
-            timestr = str(datetime.now()).split('.')[0]
-            NBData['Timestr'] = timestr
-            NBData['Time'] = timestr[-8:]
-            NBData['Year'] = timestr[:4]
-            NBData['Month'] = timestr[5:7]
-            NBData['Day'] = timestr[8:10]
-            NBData['Datetime'] = Datetime
-            
-            #add temp and weather data to NBDAta
-            NBData['Temp'] = temp
-            NBData['Weather'] = weather            
-            
-            # make the PIDs
-            #give a prediction ID larger than any so far
-            if MDF.empty:
-                PIDstart = 1
-            else:
-                PIDstart = int(max(MDF['PID'])) + 1
-            NBData['PID']=range(PIDstart, PIDstart + int(len(NBData.index)))
-            # concat it to the full data frame            
-            MDF = pd.concat([MDF,NBData])    
-            
-            filename = filepath + 'MetroMetric312.csv'
-            #append to the output. If itis a new file, add a header
-            if os.path.isfile(filename):
-                with open(filename, 'ab') as f:
-                    NBData.to_csv(f, header = False)
-            else:
-                with open(filename, 'ab') as f:
-                    NBData.to_csv(f)
-                
-            # compute any extra time in the cyclee and pause
-            Interval = datetime.now() - IntervalS
-            ExtraTime = CycleTime - Interval.seconds - Interval.microseconds*1./1000000
-            if ExtraTime > 0:
-                time.sleep(ExtraTime)
-            else:
-                print('warning, time for cycle exceeded')      
+        filename = filepath + 'MetroMetric312.csv'
+        #append to the output. If itis a new file, add a header
+        if os.path.isfile(filename):
+            with open(filename, 'ab') as f:
+                NBData.to_csv(f, header = False)
+        else:
+            with open(filename, 'ab') as f:
+                NBData.to_csv(f)     
       
     return MDF   
 
 
 # code to test the protocol and gather some data
 # initialize (run once)
-MDF = InitializeMetroDataFrame()
-RS = InitializeRouteStruct(['70'])
+# right now, this works only for one route. Will need to make the bus position code in
+# gather metro moment work on a for loop and some other changes to add multiple routes
+Route = '70'
+gMDF = InitializeMetroDataFrame()
+RS = InitializeRouteStruct([Route])
 
-# do a cycle (run every interval, currently 30 seconds)
-MDF = GatherMetroMoment(MDF,RS, 30)
+#MDF = GatherMetroMoment(MDF, RS)
 
-# a clumsy temporary while loop to get data while I'm away
-while True:
-    # only run between 5 am and midnight
-    if datetime.now().hour >= 5:
-        MDF = InitializeMetroDataFrame()
-        MDF = GatherMetroMoment(MDF, RS, 30)
-    else:
-        time.sleep(600)
-        
+# use 'schedule' to get data while I'm away
+def GatherData():
+    print "starting run at: " + time.strftime("%a, %d %b %Y %H:%M:%S +0000", time.gmtime())
+    global gMDF    
+    try:
+        gMDF = GatherMetroMoment(gMDF, RS)
+        print "run complete " +  time.strftime("%M:%S")
+    except:
+        print "error on gathering data"
+
+schedule.every(30).seconds.do(GatherData)
     
+while 1:
+    schedule.run_pending()
+    time.sleep(1)
 
-# create a version that can run repeatedly and not rely on any variable in memory
-def MetroMetricCron():
-    # grab the parameters and route structure
-
-    # run the script
-
-    # store the parameters and route structure
-
-
-
-
-# old approach
-        #for index, row in MDF[MDF['PA']==0].iterrows():
-        #    arrivals = (MDF['VehicleID']==row['VehicleID']) & ((MDF['TripID']==row['TripID']) & (MDF['StopID']==row['StopID']))
-        #    MDF[arrivals]['AA1']=(MDF[arrivals]['Datetime'].minute-row['Datetime'].minute) 
-        
-          
-        # Method 2: go through each bus ID and stop on route to find 
-            ## DistanceThreshold = 1
-            ## use google maps API to check distance  
-
-
-"""  
-# GatherMetroData will run continually and gather metro moments at an interval set in the call.
-def GatherMetroData(interval = 30, routes = []):    
-    # define hours to operate
-    # times are in seconds from midnight. 5 am is 18000. 10 pm is 79200
-    StartTime = datetime.time(5,0,0,0)
-    EndTime = datetime.time(17,0,0,0)
-    RunSeconds = EndTime.hour*60*60+EndTime.minute*60+EndTime.second-StartTime.hour*60*60-StartTime.minute*60-StartTime.second  
-    
-    # initial data survey
-    # get route stop lists
-    RouteStruct = InitializeRouteStruct(routes)
-
-    # estimate the per second and per day calls
-    # per second should be sum of stops over routes + # of routes / interval and can't be greater than 10
-    # per day should be per second * 86400 (s/ day) * fraction of the day to run
-    # to run 24 hours, therefore, need to have <= 0.57 calls / second
-    NStops = sum((len(RouteStruct[R]) for R in RouteStruct))
-    CPS = (NStops + 1)/interval
-    CPD = CPS*RunSeconds
-
-    # create a blank dataframe
-    MDF = InitializeMetroDataFrame()
-"""
-
-""" CORRECTED sample code for bus positions
-import httplib, urllib, base64
- 
-headers = {
-    # Basic Authorization Sample
-    # 'Authorization': 'Basic %s' % base64.encodestring('{username}:{password}'),
-}
- 
-params = urllib.urlencode({
-    # Specify your subscription key
-    'api_key': 'qkk2x7wckemx2bxgs8g2sq8a',
-    # Specify values for optional parameters, as needed
-    #'RouteID': 'B30',
-    #'Lat': '',
-    #'Lon': '',
-    #'Radius': '',
-})
- 
-try:
-    conn = httplib.HTTPSConnection('api.wmata.com')
-    conn.request("GET", "/Bus.svc/json/jBusPositions?%s" % params, "", headers)
-    response = conn.getresponse()
-    data = response.read()
-    print(data)
-    conn.close()
-except Exception as e:
-    print("[Errno {0}] {1}".format(e.errno, e.strerror))
-
-"""
-
-
-""" CORRECTED sample code for next bus predictions
-import httplib, urllib, base64
- 
-headers = {
-    # Basic Authorization Sample
-    # 'Authorization': 'Basic %s' % base64.encodestring('{username}:{password}'),
-}
- 
-params = urllib.urlencode({
-    # Specify your subscription key
-    'api_key': 'qkk2x7wckemx2bxgs8g2sq8a',
-    # Specify values for the following required parameters
-    'StopID': '1001195',
-})
- 
-try:
-    conn = httplib.HTTPSConnection('api.wmata.com')
-    conn.request("GET", "/NextBusService.svc/json/jPredictions?%s" % params, "", headers)
-    response = conn.getresponse()
-    data = response.read()
-    print(data)
-    conn.close()
-except Exception as e:
-    print("[Errno {0}] {1}".format(e.errno, e.strerror)
-
-"""
-
-
-""" CORRECTED sample code for Route Details
-import httplib, urllib, base64
- 
-headers = {
-    # Basic Authorization Sample
-    # 'Authorization': 'Basic %s' % base64.encodestring('{username}:{password}'),
-}
- 
-params = urllib.urlencode({
-    # Specify your subscription key
-    'api_key': 'qkk2x7wckemx2bxgs8g2sq8a',
-    # Specify values for the following required parameters
-    'RouteID': 'B30',
-    # Specify values for optional parameters, as needed
-    #'Date': '',
-})
- 
-try:
-    conn = httplib.HTTPSConnection('api.wmata.com')
-    conn.request("GET", "/Bus.svc/json/jRouteDetails?%s" % params, "", headers)
-    response = conn.getresponse()
-    data = response.read()
-    print(data)
-    conn.close()
-except Exception as e:
-    print("[Errno {0}] {1}".format(e.errno, e.strerror))
-    
-    
-"""
-
-""" sample code for incidents
-
-import httplib, urllib, base64
- 
-headers = {
-    # Basic Authorization Sample
-    # 'Authorization': 'Basic %s' % base64.encodestring('{username}:{password}'),
-}
- 
-params = urllib.urlencode({
-    # Specify your subscription key
-    'api_key': '',
-    # Specify values for optional parameters, as needed
-    #'Route': '',
-})
- 
-try:
-    conn = httplib.HTTPSConnection('api.wmata.com')
-    conn.request("GET", "/Incidents.svc/json/BusIncidents?%s" % params, "", headers)
-    response = conn.getresponse()
-    data = response.read()
-    print(data)
-    conn.close()
-except Exception as e:
-    print("[Errno {0}] {1}".format(e.errno, e.strerror))
